@@ -3,50 +3,58 @@ on:
   workflow_dispatch:
     inputs:
       urls:
-        description: 'Direct URL to the boot image or update.bin to patch'
+        description: 'Direct URL to a FireOS 6 or FireOS 8 update.bin, or to a boot image'
         required: true
 
 jobs:
   patch:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y brotli e2fsprogs zip
+
       - name: Clone AIK-Linux-mirror
         run: |
           git clone https://github.com/SebaUbuntu/AIK-Linux-mirror.git
           chmod +x AIK-Linux-mirror/*.sh
-      
+
+      - name: Clone sdat2img
+        run: git clone https://github.com/xpirt/sdat2img.git
+
       - name: Clone boot2root
         run: |
           git clone https://github.com/amazon-oss/boot2root.git
-      
-      - name: Download and extract boot image
+
+      - name: Download and extract update
         run: |
-          URL="${{ github.event.inputs.urls }}"
-          if [[ "$URL" == *.bin ]]; then
-            wget -O update.bin "$URL"
-            unzip -q update.bin boot.img
+          wget -O download.tmp "${{ github.event.inputs.urls }}"
+          if unzip -tq download.tmp > /dev/null 2>&1; then
+            unzip -q -o download.tmp
+            rm -f download.tmp
           else
-            wget -O boot.img "$URL"
+            mv download.tmp boot.img
           fi
-      
+
       - name: Execute patching script
         run: |
           chmod +x run.sh
           ./run.sh
-      
+
       - name: Extract ZIP contents
         id: artifact
         run: |
-          ZIP_FILE=$(ls boot-*.zip)
+          ZIP_FILE=$(ls boot-*.zip system-*.zip 2>/dev/null | head -n 1)
           ZIP_NAME=$(basename "$ZIP_FILE" .zip)
           mkdir -p artifact_contents
           unzip -q "$ZIP_FILE" -d artifact_contents
           echo "name=$ZIP_NAME" >> $GITHUB_OUTPUT
-      
+
       - name: Upload flashable ZIP
         uses: actions/upload-artifact@v4
         with:

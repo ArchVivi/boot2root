@@ -5,21 +5,35 @@ umask 022
 OUTFD=$2
 ZIP="$3"
 
+SYSTEM_MNT=/mnt/boot2root_system
+VENDOR_MNT=/mnt/boot2root_vendor
+
 ui_print() {
   echo -e "ui_print $1\nui_print" >> /proc/self/fd/$OUTFD
+}
+
+info() {
+  ui_print "- $1"
+}
+
+cleanup() {
+  umount $SYSTEM_MNT 2>/dev/null
+  umount $VENDOR_MNT 2>/dev/null
+}
+
+abort() {
+  cleanup
+  ui_print "(!) Error: $1"
+  exit 1
 }
 
 getprop | grep zygote | grep -q running && bootMode=true || bootMode=false
 
 if $bootMode; then
-  ui_print " "
-  ui_print "Boot mode install is not supported"
-  ui_print "Install from recovery mode"
-  ui_print " "
-  exit 1
+  abort "boot mode install is not supported, install from recovery"
 fi
 
-setenforce 0
+setenforce 0 2>/dev/null
 
 TMPDIR=/dev/tmp
 INSTALLER=$TMPDIR/install
@@ -27,44 +41,186 @@ INSTALLER=$TMPDIR/install
 rm -rf $TMPDIR 2>/dev/null
 mkdir -p $INSTALLER 2>/dev/null
 
-ui_print " "
-ui_print "Boot Image Patcher"
-ui_print " "
+map_partition() {
+  local name="$1"
 
-ui_print "Extracting files"
-unzip -o "$ZIP" 'boot.img' -d $INSTALLER >&2
+  if [ ! -b "/dev/block/mapper/$name" ]; then
+    lptools map "$name" > /dev/null 2>&1
+  fi
 
-if [ ! -f "$INSTALLER/boot.img" ]; then
-  ui_print "Error: boot.img not found in ZIP"
-  exit 1
-fi
+  [ -b "/dev/block/mapper/$name" ] || return 1
+  echo "/dev/block/mapper/$name"
+}
 
-ui_print "Finding boot partition"
-BOOT_BLOCK=$(find /dev/block/platform/*/by-name -name boot 2>/dev/null | head -n 1)
+mount_rw() {
+  local name="$1"
+  local mnt="$2"
+  local dev
 
-if [ -z "$BOOT_BLOCK" ]; then
-  BOOT_BLOCK=$(find /dev/block/by-name -name boot 2>/dev/null | head -n 1)
-fi
+  dev=$(map_partition "$name") || return 1
 
-if [ -z "$BOOT_BLOCK" ]; then
-  ui_print "Error: boot partition not found"
-  exit 1
-fi
+  blockdev --setrw "$dev" 2>/dev/null
 
-ui_print "Boot partition: $BOOT_BLOCK"
+  mkdir -p "$mnt"
+  umount "$mnt" 2>/dev/null
+  mount -o rw "$dev" "$mnt" 2>/dev/null || return 1
+  mount -o remount,rw "$mnt" 2>/dev/null
 
-ui_print "Flashing boot image"
-dd if=$INSTALLER/boot.img of=$BOOT_BLOCK bs=4096
+  drop_reserve "$dev"
 
-if [ $? -eq 0 ]; then
-  ui_print "Boot image flashed successfully"
+  return 0
+}
+
+drop_reserve() {
+  local node
+
+  node=$(readlink -f "$1")
+  node=${node##*/}
+
+  [ -w "/sys/fs/ext4/$node/reserved_clusters" ] || return 0
+  echo 0 > "/sys/fs/ext4/$node/reserved_clusters"
+}
+
+write_in_place() {
+  local src="$1"
+  local dst="$2"
+
+  if [ "$(wc -c < "$src")" -ge "$(wc -c < "$dst")" ]; then
+    dd if="$src" of="$dst" conv=notrunc bs=4096 2>/dev/null || return 1
+  else
+    cat "$src" > "$dst" || return 1
+  fi
+}
+
+set_prop() {
+  local file="$1"
+  local key="$2"
+  local value="$3"
+
+  if grep -q "^$key=" "$file"; then
+    sed "s|^$key=.*|$key=$value|" "$file" > $INSTALLER/prop
+  else
+    { cat "$file"; echo "$key=$value"; } > $INSTALLER/prop
+  fi
+
+  write_in_place $INSTALLER/prop "$file" || abort "could not write $file"
+  rm -f $INSTALLER/prop
+}
+
+patch_adbd() {
+  local file="$1"
+  local offset before after current
+
+  while read -r offset before after; do
+    [ -n "$offset" ] || continue
+
+    current=$(dd if="$file" bs=1 skip="$offset" count=$((${#before} / 2)) 2>/dev/null | od -An -tx1 | tr -d ' \n')
+
+    if [ "$current" = "$after" ]; then
+      continue
+    fi
+
+    if [ "$current" != "$before" ]; then
+      abort "adbd does not match this build"
+    fi
+
+    printf "$(echo "$after" | sed 's/../\\x&/g')" |
+      dd of="$file" bs=1 seek="$offset" conv=notrunc 2>/dev/null || abort "could not patch adbd"
+  done < $INSTALLER/patch/adbd.patch
+}
+
+patch_system() {
+  command -v lptools > /dev/null 2>&1 || abort "lptools not found, use a twrp build that ships it"
+
+  [ "$(printf '\x41')" = "A" ] || abort "printf does not support hex escapes"
+
+  unzip -o "$ZIP" 'patch/*' -d $INSTALLER > /dev/null 2>&1
+  [ -f "$INSTALLER/patch/adbd.patch" ] || abort "patch payload missing from zip"
+
+  mount_rw system $SYSTEM_MNT || abort "could not mount system read-write"
+  mount_rw vendor $VENDOR_MNT || abort "could not mount vendor read-write"
+
+  info "patching properties"
+  PROP=$SYSTEM_MNT/system/etc/prop.default
+  [ -f "$PROP" ] || abort "$PROP not found"
+  set_prop "$PROP" ro.secure 0
+  set_prop "$PROP" ro.adb.secure 0
+  set_prop "$PROP" ro.debuggable 1
+  set_prop "$PROP" persist.sys.usb.config mtp,adb
+
+  info "installing fos flags override"
+  [ -f "$SYSTEM_MNT/init.fosflags.sh" ] || abort "init.fosflags.sh not found"
+  cat > $INSTALLER/fosflags <<'EOF'
+#!/system/bin/sh
+PATH=/sbin:/system/sbin:/system/bin:/system/xbin
+
+setprop persist.sys.usb.config mtp,adb
+setprop amazon.fos_flags.noadbauth 1
+EOF
+  write_in_place $INSTALLER/fosflags "$SYSTEM_MNT/init.fosflags.sh" ||
+    abort "could not write init.fosflags.sh"
+
+  info "patching adbd"
+  ADBD=$SYSTEM_MNT/system/apex/com.android.adbd/bin/adbd
+  [ -f "$ADBD" ] || abort "$ADBD not found"
+  patch_adbd "$ADBD"
+
+  info "neutering ota updates"
+  BUILD_PROP=$SYSTEM_MNT/system/build.prop
+  [ -f "$BUILD_PROP" ] || abort "$BUILD_PROP not found"
+  if [ -f "$INSTALLER/patch/build.prop.patch" ]; then
+    while IFS='=' read -r KEY VALUE; do
+      [ -n "$KEY" ] || continue
+      set_prop "$BUILD_PROP" "$KEY" "$VALUE"
+    done < $INSTALLER/patch/build.prop.patch
+  fi
+
+  info "patching selinux policy"
+  SEPOLICY=$VENDOR_MNT/etc/selinux/precompiled_sepolicy
+  [ -f "$SEPOLICY" ] || abort "$SEPOLICY not found"
+
+  if [ -f "$INSTALLER/patch/sepolicy.sha256" ]; then
+    CURRENT=$(sha256sum < "$SEPOLICY" | cut -d' ' -f1)
+    grep -q "^$CURRENT$" $INSTALLER/patch/sepolicy.sha256 ||
+      abort "sepolicy does not match this build"
+  fi
+
+  info "removing recovery restore service"
+  rm -f "$VENDOR_MNT/etc/init/vendor_flash_recovery.rc"
+  rm -f "$VENDOR_MNT/bin/install-recovery.sh"
+  rm -f "$VENDOR_MNT/recovery-from-boot.p"
+
+  write_in_place $INSTALLER/patch/precompiled_sepolicy "$SEPOLICY" ||
+    abort "could not write sepolicy"
+
+  sync
+  cleanup
+}
+
+flash_boot() {
+  info "extracting files"
+  unzip -o "$ZIP" 'boot.img' -d $INSTALLER > /dev/null 2>&1
+
+  [ -f "$INSTALLER/boot.img" ] || abort "boot.img not found in zip"
+
+  BOOT_BLOCK=$(find /dev/block/platform/*/by-name -name boot 2>/dev/null | head -n 1)
+
+  if [ -z "$BOOT_BLOCK" ]; then
+    BOOT_BLOCK=$(find /dev/block/by-name -name boot 2>/dev/null | head -n 1)
+  fi
+
+  [ -n "$BOOT_BLOCK" ] || abort "boot partition not found"
+
+  info "flashing boot image"
+  dd if=$INSTALLER/boot.img of=$BOOT_BLOCK bs=4096 2>/dev/null || abort "failed to flash boot image"
+}
+
+if unzip -l "$ZIP" | grep -q 'patch/adbd.patch'; then
+  patch_system
 else
-  ui_print "Error: Failed to flash boot image"
-  exit 1
+  flash_boot
 fi
 
-ui_print " "
-ui_print "Installation complete"
-ui_print " "
+info "done"
 
 exit 0
