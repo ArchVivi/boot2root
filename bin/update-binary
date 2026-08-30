@@ -13,7 +13,7 @@ ui_print() {
 }
 
 info() {
-  ui_print "- $1"
+  ui_print "- info $1"
 }
 
 cleanup() {
@@ -179,18 +179,27 @@ EOF
   SEPOLICY=$VENDOR_MNT/etc/selinux/precompiled_sepolicy
   [ -f "$SEPOLICY" ] || abort "$SEPOLICY not found"
 
-  if [ -f "$INSTALLER/patch/sepolicy.sha256" ]; then
-    CURRENT=$(sha256sum < "$SEPOLICY" | cut -d' ' -f1)
-    grep -q "^$CURRENT$" $INSTALLER/patch/sepolicy.sha256 ||
-      abort "sepolicy does not match this build"
-  fi
+  case "$(uname -m)" in
+    *64) MAGISKPOLICY=$INSTALLER/patch/magiskpolicy64 ;;
+    *)   MAGISKPOLICY=$INSTALLER/patch/magiskpolicy32 ;;
+  esac
+  [ -f "$MAGISKPOLICY" ] || abort "policy patcher missing from zip"
+  chmod 755 "$MAGISKPOLICY"
+
+  "$MAGISKPOLICY" --load "$SEPOLICY" --apply $INSTALLER/patch/sepolicy.rules \
+    --save $INSTALLER/sepolicy.new > /dev/null 2>&1 ||
+    $INSTALLER/patch/magiskpolicy32 --load "$SEPOLICY" --apply $INSTALLER/patch/sepolicy.rules \
+      --save $INSTALLER/sepolicy.new > /dev/null 2>&1 ||
+    abort "could not patch sepolicy"
+
+  [ -s "$INSTALLER/sepolicy.new" ] || abort "policy patcher produced nothing"
 
   info "removing recovery restore service"
   rm -f "$VENDOR_MNT/etc/init/vendor_flash_recovery.rc"
   rm -f "$VENDOR_MNT/bin/install-recovery.sh"
   rm -f "$VENDOR_MNT/recovery-from-boot.p"
 
-  write_in_place $INSTALLER/patch/precompiled_sepolicy "$SEPOLICY" ||
+  write_in_place $INSTALLER/sepolicy.new "$SEPOLICY" ||
     abort "could not write sepolicy"
 
   sync

@@ -1,0 +1,11 @@
+permissive adbd
+permissive su
+allow adbd adbd process setcurrent
+allow adbd su process { transition dyntransition }
+allow su su process setcurrent
+allow domain su binder { call transfer }
+allow domain su fd use
+allow domain su process sigchld
+allow domain su fifo_file { read write getattr ioctl append lock map open }
+allow domain su file { read write getattr ioctl append lock map open }
+allow domain su unix_stream_socket { connectto read write getattr ioctl shutdown }

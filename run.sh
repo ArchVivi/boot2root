@@ -7,7 +7,7 @@ AIK_DIR="AIK-Linux-mirror"
 SDAT2IMG_DIR="sdat2img"
 BOOT2ROOT_DIR="boot2root"
 WORK_DIR="work"
-PARTITIONS="system vendor"
+PARTITIONS="system"
 
 read_prop() {
     local prop_file="$1"
@@ -134,11 +134,6 @@ fs_extract() {
     [ -s "$dest" ] || { echo "Error: could not read $path"; exit 1; }
 }
 
-inject_sepolicy() {
-    "$BOOT2ROOT_DIR/tools/sepolicy-inject" "$@" -P "$WORK_DIR/sepolicy" -o "$WORK_DIR/sepolicy.new" > /dev/null 2>&1
-    mv "$WORK_DIR/sepolicy.new" "$WORK_DIR/sepolicy"
-}
-
 create_zip() {
     local name="$1"
     local dir="$2"
@@ -239,23 +234,10 @@ patch_dynamic_partitions() {
     echo "ro.build.version.number=$(((1 << 52) | (OTA_VERSION & 1048575)))" > "$PATCH_DIR/build.prop.patch"
     echo "  $OTA_VERSION -> $(cut -d= -f2 "$PATCH_DIR/build.prop.patch")"
 
-    echo "Patching SELinux policy"
-    chmod +x "$BOOT2ROOT_DIR/tools/sepolicy-inject"
-    fs_extract "$WORK_DIR/vendor.img" /etc/selinux/precompiled_sepolicy "$WORK_DIR/sepolicy"
-    sha256sum < "$WORK_DIR/sepolicy" | cut -d' ' -f1 > "$PATCH_DIR/sepolicy.sha256"
-    inject_sepolicy -Z adbd
-    inject_sepolicy -Z su
-    inject_sepolicy -s adbd -t adbd -c process -p setcurrent
-    inject_sepolicy -s adbd -t su -c process -p transition,dyntransition
-    inject_sepolicy -s su -t su -c process -p setcurrent
-    inject_sepolicy -s domain -t su -c binder -p call,transfer
-    inject_sepolicy -s domain -t su -c fd -p use
-    inject_sepolicy -s domain -t su -c process -p sigchld
-    inject_sepolicy -s domain -t su -c fifo_file -p read,write,getattr,ioctl,append,lock,map,open
-    inject_sepolicy -s domain -t su -c file -p read,write,getattr,ioctl,append,lock,map,open
-    inject_sepolicy -s domain -t su -c unix_stream_socket -p connectto,read,write,getattr,ioctl,shutdown
-    sha256sum < "$WORK_DIR/sepolicy" | cut -d' ' -f1 >> "$PATCH_DIR/sepolicy.sha256"
-    mv "$WORK_DIR/sepolicy" "$PATCH_DIR/precompiled_sepolicy"
+    echo "Installing SELinux policy patcher"
+    cp "$BOOT2ROOT_DIR/bin/magiskpolicy32" "$PATCH_DIR/"
+    cp "$BOOT2ROOT_DIR/bin/magiskpolicy64" "$PATCH_DIR/"
+    cp "$BOOT2ROOT_DIR/bin/sepolicy.rules" "$PATCH_DIR/"
 
     DESCRIPTION=$(read_prop ota.prop "description")
 
