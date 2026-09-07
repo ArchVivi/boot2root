@@ -135,7 +135,7 @@ fs_extract() {
 }
 
 create_zip() {
-    local name="$1"
+    local name=$(echo ${1//[^[:alnum:]]})
     local dir="$2"
 
     cp "$BOOT2ROOT_DIR/bin/update-binary" "$dir/META-INF/com/google/android/"
