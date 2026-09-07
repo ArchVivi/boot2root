@@ -53,7 +53,6 @@ jobs:
           ZIP_NAME=$(basename "$ZIP_FILE" .zip)
           mkdir -p artifact_contents
           unzip -q "$ZIP_FILE" -d artifact_contents
-          for file in artifact_contents/*; do mv "$file" artifact_contents/$(echo "$file" | sed -e 's/[^A-Za-z0-9._-]/_/g'); done
           echo "name=$ZIP_NAME" >> $GITHUB_OUTPUT
 
       - name: Upload flashable ZIP
