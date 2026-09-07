@@ -193,6 +193,7 @@ patch_ramdisk() {
         MODEL=$(echo "$FINGERPRINT" | cut -d'/' -f2)
         BUILD_INFO=$(echo "$FINGERPRINT" | cut -d'/' -f4 | cut -d':' -f1)
         OUTPUT_NAME="boot-${MODEL}-${BUILD_INFO}"
+        OUTPUT_NAME=$(echo "$OUTPUT_NAME" | tr '/:' '__' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
         echo "Device: $MODEL ($BUILD_INFO)"
     else
         OUTPUT_NAME="boot-patched"
@@ -245,6 +246,7 @@ patch_dynamic_partitions() {
         MODEL=$(echo "$DESCRIPTION" | cut -d'/' -f2)
         BUILD_INFO=$(echo "$DESCRIPTION" | cut -d'/' -f4 | cut -d':' -f1)
         OUTPUT_NAME="system-${MODEL}-${BUILD_INFO}"
+        OUTPUT_NAME=$(echo "$OUTPUT_NAME" | tr '/:' '__' | sed 's/__*/_/g' | sed 's/^_//;s/_$//')
         echo "Device: $MODEL ($BUILD_INFO)"
     else
         OUTPUT_NAME="system-patched"
